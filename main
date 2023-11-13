@@ -1,0 +1,107 @@
+Imports Interop.QBFC16
+Imports OfficeOpenXml
+Imports OfficeOpenXml.Table
+
+Public Class Form1
+    Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        ' Set EPPlus LicenseContext at the beginning
+        ExcelPackage.LicenseContext = LicenseContext.NonCommercial
+
+        Dim sessionManager As New QBSessionManager()
+        Dim allEmployeeNames As New List(Of String) ' Initialize list to hold employee names
+        Dim data As New Dictionary(Of String, Dictionary(Of String, Dictionary(Of Date, Double)))
+
+        Try
+            sessionManager.OpenConnection("", "Shiloh")
+            sessionManager.BeginSession("", ENOpenMode.omDontCare)
+
+            Dim requestMsgSet As IMsgSetRequest = sessionManager.CreateMsgSetRequest("US", 16, 0)
+            Dim timeTrackingQueryRq As ITimeTrackingQuery = requestMsgSet.AppendTimeTrackingQueryRq()
+
+            Dim fromDate As Date = Date.Now.AddDays(-7) ' 7 days ago
+            Dim toDate As Date = Date.Now ' today
+            MessageBox.Show($"Querying from {fromDate.ToShortDateString()} to {toDate.ToShortDateString()}")
+
+            timeTrackingQueryRq.ORTimeTrackingTxnQuery.TimeTrackingTxnFilter.ORDateRangeFilter.TxnDateRangeFilter.ORTxnDateRangeFilter.TxnDateFilter.FromTxnDate.SetValue(fromDate)
+            timeTrackingQueryRq.ORTimeTrackingTxnQuery.TimeTrackingTxnFilter.ORDateRangeFilter.TxnDateRangeFilter.ORTxnDateRangeFilter.TxnDateFilter.ToTxnDate.SetValue(toDate)
+
+            Dim responseMsgSet As IMsgSetResponse = sessionManager.DoRequests(requestMsgSet)
+
+            Dim response As IResponse = responseMsgSet.ResponseList.GetAt(0)
+            If response.StatusCode = 0 Then
+                Dim timeTrackList As ITimeTrackingRetList = DirectCast(response.Detail, ITimeTrackingRetList)
+                For i As Integer = 0 To timeTrackList.Count - 1
+                    Dim timeTrack As ITimeTrackingRet = timeTrackList.GetAt(i)
+                    Dim hours As Short, minutes As Short, seconds As Short, isNegative As Boolean
+                    timeTrack.Duration.GetValue(hours, minutes, seconds, isNegative)
+                    Dim decimalHours As Double = hours + (minutes / 60.0) + (seconds / 3600.0)
+                    If isNegative Then decimalHours = -decimalHours
+
+                    Dim employeeName As String = timeTrack.EntityRef.FullName.GetValue().Trim()
+                    allEmployeeNames.Add(employeeName) ' Add each employee name to the list
+
+                    Dim className As String = If(timeTrack.ClassRef IsNot Nothing, timeTrack.ClassRef.FullName.GetValue(), "No Class")
+                    Dim txnDate As Date = timeTrack.TxnDate.GetValue()
+
+                    If Not data.ContainsKey(employeeName) Then
+                        data(employeeName) = New Dictionary(Of String, Dictionary(Of Date, Double))()
+                    End If
+
+                    If Not data(employeeName).ContainsKey(className) Then
+                        data(employeeName)(className) = New Dictionary(Of Date, Double)()
+                    End If
+
+                    If data(employeeName)(className).ContainsKey(txnDate) Then
+                        data(employeeName)(className)(txnDate) += decimalHours
+                    Else
+                        data(employeeName)(className)(txnDate) = decimalHours
+                    End If
+                Next
+
+                MessageBox.Show("Received Employee Names: " & String.Join(", ", allEmployeeNames)) ' Show all employee names in a single message box
+
+                SaveToExcel(data)
+            Else
+                MessageBox.Show("Error: " & response.StatusMessage)
+            End If
+
+        Catch ex As Exception
+            MessageBox.Show("Exception: " & ex.Message)
+        Finally
+            sessionManager.EndSession()
+            sessionManager.CloseConnection()
+        End Try
+    End Sub
+
+    Private Sub SaveToExcel(data As Dictionary(Of String, Dictionary(Of String, Dictionary(Of Date, Double))))
+        ' Set EPPlus LicenseContext
+        ExcelPackage.LicenseContext = LicenseContext.NonCommercial
+
+        Using package As New ExcelPackage()
+            Dim worksheet = package.Workbook.Worksheets.Add("Raw Time Data")
+
+            ' Write header
+            worksheet.Cells(1, 1).Value = "Employee"
+            worksheet.Cells(1, 2).Value = "Class"
+            worksheet.Cells(1, 3).Value = "Date"
+            worksheet.Cells(1, 4).Value = "Duration"
+
+            ' Populate the data
+            Dim row As Integer = 2
+            For Each employee In data.Keys
+                For Each className In data(employee).Keys
+                    For Each dateEntry In data(employee)(className).Keys
+                        worksheet.Cells(row, 1).Value = employee
+                        worksheet.Cells(row, 2).Value = className
+                        worksheet.Cells(row, 3).Value = dateEntry.ToString("d")
+                        worksheet.Cells(row, 4).Value = data(employee)(className)(dateEntry).ToString("0.##")
+                        row += 1
+                    Next
+                Next
+            Next
+
+            Dim path = "C:\Users\MaryJane\Documents\RawTime.xlsx"
+            package.SaveAs(New IO.FileInfo(path))
+        End Using
+    End Sub
+End Class
